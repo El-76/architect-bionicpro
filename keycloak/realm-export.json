@@ -110,24 +110,24 @@
       }
     ],
     "clients": [
-      {
-        "clientId": "reports-frontend",
+    {
+        "clientId": "bionicpro-auth",
         "enabled": true,
-        "publicClient": true,
+        "publicClient": false,
+        "clientAuthenticatorType": "client-secret",
+        "secret": "K8vQ2mNpR7xL4aWcY9fH3jDsT6uB5zXe",
+        "standardFlowEnabled": true,
+        "directAccessGrantsEnabled": false,
         "redirectUris": [
-            "http://localhost:3000/*",
-            "http://192.168.56.106:3000/*"
+            "http://localhost:8081/auth/callback",
+	    "http://192.168.56.106:8081/auth/callback"
         ],
-        "webOrigins": [
-            "http://localhost:3000",
-            "http://192.168.56.106:3000"
-        ],
-        "directAccessGrantsEnabled": true,
+        "webOrigins": [],
         "attributes": {
-          "pkce.code.challenge.method": "S256"
+	  "pkce.code.challenge.method": "S256"
         }
-      },
-      {
+     },
+     {
         "clientId": "reports-api",
         "enabled": true,
         "clientAuthenticatorType": "client-secret",

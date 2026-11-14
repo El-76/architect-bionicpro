@@ -14,10 +14,12 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -o temperature-api
+RUN CGO_ENABLED=0 GOOS=linux go build -o bionicpro-auth
 
 # Runtime stage
 FROM alpine:latest
+
+ENV OIDC_CLIENT_SECRET=K8vQ2mNpR7xL4aWcY9fH3jDsT6uB5zXe
 
 # Install necessary runtime dependencies
 RUN apk --no-cache add ca-certificates tzdata
