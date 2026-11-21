@@ -31,11 +31,30 @@ type Session struct {
 
 	UserID                string
 	Username              string
+	IdentityProvider      string
+	YandexProfile         *YandexProfile
 	AccessToken           string
 	EncryptedRefreshToken string
 	AccessTokenExpiresAt  time.Time
 	LastActivity          time.Time
 	AbsoluteExpiresAt     time.Time
+}
+
+type YandexProfile struct {
+	ID              string   `json:"id"`
+	Login           string   `json:"login,omitempty"`
+	ClientID        string   `json:"client_id,omitempty"`
+	DisplayName     string   `json:"display_name,omitempty"`
+	RealName        string   `json:"real_name,omitempty"`
+	FirstName       string   `json:"first_name,omitempty"`
+	LastName        string   `json:"last_name,omitempty"`
+	Sex             string   `json:"sex,omitempty"`
+	DefaultEmail    string   `json:"default_email,omitempty"`
+	Emails          []string `json:"emails,omitempty"`
+	Birthday        string   `json:"birthday,omitempty"`
+	DefaultAvatarID string   `json:"default_avatar_id,omitempty"`
+	IsAvatarEmpty   bool     `json:"is_avatar_empty"`
+	PSUID           string   `json:"psuid,omitempty"`
 }
 
 type AuthRequest struct {
@@ -73,10 +92,12 @@ type jwk struct {
 }
 
 type internalSessionResponse struct {
-	UserID      string    `json:"user_id"`
-	Username    string    `json:"username,omitempty"`
-	AccessToken string    `json:"access_token"`
-	ExpiresAt   time.Time `json:"access_token_expires_at"`
+	UserID           string         `json:"user_id"`
+	Username         string         `json:"username,omitempty"`
+	IdentityProvider string         `json:"identity_provider,omitempty"`
+	YandexProfile    *YandexProfile `json:"yandex_profile,omitempty"`
+	AccessToken      string         `json:"access_token"`
+	ExpiresAt        time.Time      `json:"access_token_expires_at"`
 }
 
 const (
@@ -92,6 +113,8 @@ const (
 	oidcAuthorizationURL = oidcIssuer + "/protocol/openid-connect/auth"
 	oidcTokenURL         = oidcIssuer + "/protocol/openid-connect/token"
 	oidcJWKSURL          = oidcIssuer + "/protocol/openid-connect/certs"
+	brokerYandexTokenURL = oidcIssuer + "/broker/yandex/token"
+	yandexInfoURL        = "https://login.yandex.ru/info?format=json"
 	oidcClientID         = "bionicpro-auth"
 	oidcRedirectURI      = "http://192.168.56.106:8081/auth/callback"
 	frontendRedirectURI  = "http://192.168.56.106:3000/"
@@ -306,6 +329,37 @@ func handleAuthCallback(c *gin.Context) {
 		return
 	}
 	username, _ := claims["preferred_username"].(string)
+
+	// This access token was just received directly from our Keycloak token
+	// endpoint. Decode its payload to select the identity-provider flow; do not
+	// treat the decoded claim as an independent authentication decision.
+	accessClaims, err := decodeJWTClaims(tokens.AccessToken)
+	if err != nil {
+		log.Printf("Could not decode Keycloak access token claims: %v", err)
+		c.AbortWithStatus(http.StatusBadGateway)
+		return
+	}
+
+	identityProvider, _ := accessClaims["identity_provider"].(string)
+	var yandexProfile *YandexProfile
+	if identityProvider == "yandex" {
+		yandexAccessToken, err := retrieveYandexAccessToken(c.Request.Context(), tokens.AccessToken)
+		if err != nil {
+			log.Printf("Could not retrieve Yandex access token from Keycloak: %v", err)
+			c.AbortWithStatus(http.StatusBadGateway)
+			return
+		}
+
+		profile, err := fetchYandexProfile(c.Request.Context(), yandexAccessToken)
+		if err != nil {
+			log.Printf("Could not retrieve Yandex profile: %v", err)
+			c.AbortWithStatus(http.StatusBadGateway)
+			return
+		}
+		yandexProfile = &profile
+                log.Printf("Yandex profile: %v", yandexProfile)
+	}
+
 	encryptedRefreshToken, err := encryptRefreshToken(tokens.RefreshToken)
 	if err != nil {
 		log.Printf("Could not encrypt refresh token: %v", err)
@@ -319,7 +373,8 @@ func handleAuthCallback(c *gin.Context) {
 	}
 	now := time.Now()
 	session := &Session{
-		UserID: userID, Username: username, AccessToken: tokens.AccessToken,
+		UserID: userID, Username: username, IdentityProvider: identityProvider,
+		YandexProfile: yandexProfile, AccessToken: tokens.AccessToken,
 		EncryptedRefreshToken: encryptedRefreshToken,
 		AccessTokenExpiresAt:  now.Add(time.Duration(tokens.ExpiresIn) * time.Second),
 		LastActivity:          now, AbsoluteExpiresAt: now.Add(absoluteSessionTTL),
@@ -426,6 +481,103 @@ func validateIDToken(rawToken, expectedNonce string) (map[string]interface{}, er
 	return claims, nil
 }
 
+func decodeJWTClaims(rawToken string) (map[string]interface{}, error) {
+	parts := strings.Split(rawToken, ".")
+	if len(parts) != 3 {
+		return nil, errors.New("malformed access token")
+	}
+
+	claimsBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("decode access token claims: %w", err)
+	}
+
+	var claims map[string]interface{}
+	if err := json.Unmarshal(claimsBytes, &claims); err != nil {
+		return nil, fmt.Errorf("parse access token claims: %w", err)
+	}
+	return claims, nil
+}
+
+func retrieveYandexAccessToken(ctx context.Context, keycloakAccessToken string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, brokerYandexTokenURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+keycloakAccessToken)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("Keycloak broker token request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("read Keycloak broker token response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Keycloak broker token endpoint returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	// Keycloak broker API V1/provider implementations may return either a
+	// token response JSON object or the token itself. Accept both formats.
+	var tokenPayload struct {
+		AccessToken string `json:"access_token"`
+		OAuthToken  string `json:"oauth_token"`
+		Token       string `json:"token"`
+	}
+	if json.Unmarshal(body, &tokenPayload) == nil {
+		switch {
+		case tokenPayload.AccessToken != "":
+			return tokenPayload.AccessToken, nil
+		case tokenPayload.OAuthToken != "":
+			return tokenPayload.OAuthToken, nil
+		case tokenPayload.Token != "":
+			return tokenPayload.Token, nil
+		}
+	}
+
+	var tokenString string
+	if json.Unmarshal(body, &tokenString) == nil && strings.TrimSpace(tokenString) != "" {
+		return strings.TrimSpace(tokenString), nil
+	}
+	if token := strings.TrimSpace(string(body)); token != "" {
+		return token, nil
+	}
+	return "", errors.New("Keycloak broker token endpoint returned an empty token")
+}
+
+func fetchYandexProfile(ctx context.Context, yandexAccessToken string) (YandexProfile, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, yandexInfoURL, nil)
+	if err != nil {
+		return YandexProfile{}, err
+	}
+	req.Header.Set("Authorization", "OAuth "+yandexAccessToken)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return YandexProfile{}, fmt.Errorf("Yandex /info request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return YandexProfile{}, fmt.Errorf("Yandex /info returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var profile YandexProfile
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&profile); err != nil {
+		return YandexProfile{}, fmt.Errorf("decode Yandex /info response: %w", err)
+	}
+	if profile.ID == "" {
+		return YandexProfile{}, errors.New("Yandex /info response does not contain user id")
+	}
+	return profile, nil
+}
+
 func fetchSigningKey(keyID string) (*rsa.PublicKey, error) {
 	req, err := http.NewRequest(http.MethodGet, oidcJWKSURL, nil)
 	if err != nil {
@@ -503,9 +655,16 @@ func handleSession(c *gin.Context) {
 	}
 	session.LastActivity = time.Now()
 	setSessionCookie(c, currentSessionID, sessionCookieMaxAge(session, session.LastActivity))
+	user := gin.H{"preferred_username": session.Username}
+	if session.IdentityProvider != "" {
+		user["identity_provider"] = session.IdentityProvider
+	}
+	if session.YandexProfile != nil {
+		user["yandex_profile"] = session.YandexProfile
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"authenticated": true,
-		"user":          gin.H{"preferred_username": session.Username},
+		"user":          user,
 	})
 }
 
@@ -607,6 +766,7 @@ func validateRefreshAndRotate(ctx context.Context, oldSessionID string) (string,
 	}
 	response := internalSessionResponse{
 		UserID: session.UserID, Username: session.Username,
+		IdentityProvider: session.IdentityProvider, YandexProfile: session.YandexProfile,
 		AccessToken: session.AccessToken, ExpiresAt: session.AccessTokenExpiresAt,
 	}
 	cookieMaxAge := sessionCookieMaxAge(session, now)
@@ -733,3 +893,4 @@ func generateRandomToken(byteLength int) (string, error) {
 	}
 	return base64.RawURLEncoding.EncodeToString(value), nil
 }
+

@@ -168,3 +168,36 @@ Yandex
 
 
 http://192.168.56.106:8080/realms/reports-realm/broker/yandex/endpoint
+
+
+Настройка для bionicpro-auth
+1. Открой Clients → bionicpro-auth.
+2. Перейди в Client scopes.
+3. Открой bionicpro-auth-dedicated.
+4. Перейди в Mappers → Configure a new mapper.
+5. Выбери User Session Note.
+Заполни настройки:
+Mapper: Identity Provider
+NameIdentity Provider
+
+
+User Session Noteidentity_provider
+
+Token Claim Nameidentity_provider
+
+Claim JSON TypeString
+
+
+Add to access token
+ON
+
+Add to ID token
+По желанию
+
+
+
+Realm Roles
+
+default-roles-reports-realm
+
+Assign role -> broker/read token

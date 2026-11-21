@@ -44,6 +44,30 @@ services:
       - ./bionicpro-auth/.env
     ports:
       - "8081:8081"
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@bionicpro-auth-db:5432/postgres?sslmode=disable
+    depends_on:
+      bionicpro-auth-db:
+        condition: service_healthy
+
+  bionicpro-auth-db:
+    image: postgres:16-alpine
+    container_name: bionicpro-auth-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./bionicpro-auth/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - bionicpro_auth_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "sh -c 'pg_isready -U postgres -d postgres'"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
   openldap:
     image: osixia/openldap:1.5.0
     container_name: openldap
@@ -67,3 +91,5 @@ services:
 
     command: --copy-service
 
+volumes:
+  bionicpro_auth_data:
