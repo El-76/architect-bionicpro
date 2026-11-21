@@ -14,19 +14,19 @@ type SessionInfo = {
 type AuthStatus = 'checking' | 'authenticated' | 'unauthenticated';
 
 const AUTH_URL = (process.env.REACT_APP_AUTH_API_URL || '').replace(/\/+$/, '');
-const BFF_URL = (process.env.REACT_APP_REPORT_API_URL || '').replace(/\/+$/, '');
+const REPORT_API_URL = (process.env.REACT_APP_REPORT_API_URL || '').replace(/\/+$/, '');
 
 function authEndpoint(path: string): string {
   return `${AUTH_URL}${path}`;
 }
 
 function reportEndpoint(path: string): string {
-  return `${BFF_URL}${path}`;
+  return `${REPORT_API_URL}${path}`;
 }
 
-// React.StrictMode intentionally re-runs effects in development. Keep one
-// session check per page load because /auth/session currently rotates the
-// session ID and should not be called twice during the initial render.
+// React.StrictMode intentionally re-runs effects in development. Reuse the
+// initial session check so the page does not issue duplicate auth requests.
+// Session ID rotation happens inside reports-api's protected-request flow.
 let sessionCheckPromise: Promise<SessionInfo> | null = null;
 
 function checkSession(): Promise<SessionInfo> {
