@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from datetime import date, datetime, timedelta
 import logging
 
@@ -27,7 +25,7 @@ def _date_key(value: datetime) -> tuple[int, date]:
 
 
 def load_dimensions_and_facts() -> None:
-    """Incrementally copy telemetry into OLAP; refresh dimensions first."""
+    """Incrementally load source data, then rebuild the reporting mart."""
 
     # 1. Read CRM dimensions from Oracle.
     oracle_hook = OracleHook(oracle_conn_id="source_oracle")
@@ -79,11 +77,19 @@ def load_dimensions_and_facts() -> None:
             """, (last_measurement_id,))
             measurements = cur.fetchall()
 
-    # 4. Load/update dimensions, then insert facts in one OLAP transaction.
+    # 4. Validate sensor types and units in this incremental batch.
     sensor_units: dict[str, str] = {}
-    for _measurement_id, _prosthesis_id, sensor_type, _measured_at, _value, unit in measurements:
+    for (
+        _measurement_id,
+        _prosthesis_id,
+        sensor_type,
+        _measured_at,
+        _value,
+        unit,
+    ) in measurements:
         if sensor_type not in SENSOR_IDS:
             raise ValueError(f"Unsupported sensor_type: {sensor_type}")
+
         previous_unit = sensor_units.setdefault(sensor_type, unit)
         if previous_unit != unit:
             raise ValueError(
@@ -99,7 +105,7 @@ def load_dimensions_and_facts() -> None:
     date_rows: dict[int, tuple[int, date]] = {}
     fact_rows = []
 
-    for measurement_id, prosthesis_id, sensor_type, measured_at, value, unit in measurements:
+    for measurement_id, prosthesis_id, sensor_type, measured_at, value, _unit in measurements:
         if prosthesis_id not in prosthesis_to_patient:
             raise ValueError(
                 f"Measurement {measurement_id} references unknown prosthesis {prosthesis_id}"
@@ -108,10 +114,8 @@ def load_dimensions_and_facts() -> None:
             raise ValueError(f"Unsupported sensor_type: {sensor_type}")
 
         date_id, date_value = _date_key(measured_at)
-        date_rows[date_id] = (
-            date_id,
-            date_value,
-        )
+        date_rows[date_id] = (date_id, date_value)
+
         fact_rows.append((
             measurement_id,
             prosthesis_to_patient[prosthesis_id],
@@ -122,6 +126,8 @@ def load_dimensions_and_facts() -> None:
             float(value),
         ))
 
+    # 5. Load dimensions and facts, then rebuild the reporting mart.
+    # Everything in this block is committed as one OLAP transaction.
     with olap_hook.get_conn() as olap_conn:
         with olap_conn.cursor() as cur:
             cur.executemany("""
@@ -187,15 +193,85 @@ def load_dimensions_and_facts() -> None:
                         value = EXCLUDED.value
                 """, fact_rows)
 
+            # The mart is a derived aggregate, so rebuild it from the complete
+            # fact table. This also reflects CRM dimension changes on every run.
+            cur.execute("DELETE FROM olap.mart_patient_telemetry_daily")
+
+            cur.execute("""
+                INSERT INTO olap.mart_patient_telemetry_daily (
+                    patient_id,
+                    first_name,
+                    last_name,
+                    prosthesis_id,
+                    prosthesis_model,
+                    serial_number,
+                    date_id,
+                    measurement_date,
+                    sensor_id,
+                    sensor_type,
+                    unit,
+                    measurement_count,
+                    avg_value,
+                    min_value,
+                    max_value
+                )
+                SELECT
+                    p.patient_id,
+                    p.first_name,
+                    p.last_name,
+                    pr.prosthesis_id,
+                    pr.model,
+                    pr.serial_number,
+                    d.date_id,
+                    d.date_value,
+                    s.sensor_id,
+                    s.sensor_type,
+                    s.unit,
+                    COUNT(*) AS measurement_count,
+                    AVG(f.value) AS avg_value,
+                    MIN(f.value) AS min_value,
+                    MAX(f.value) AS max_value
+                FROM olap.fact_sensor_measurements f
+                JOIN olap.dim_patient p
+                  ON p.patient_id = f.patient_id
+                JOIN olap.dim_prosthesis pr
+                  ON pr.prosthesis_id = f.prosthesis_id
+                JOIN olap.dim_date d
+                  ON d.date_id = f.date_id
+                JOIN olap.dim_sensor s
+                  ON s.sensor_id = f.sensor_id
+                GROUP BY
+                    p.patient_id,
+                    p.first_name,
+                    p.last_name,
+                    pr.prosthesis_id,
+                    pr.model,
+                    pr.serial_number,
+                    d.date_id,
+                    d.date_value,
+                    s.sensor_id,
+                    s.sensor_type,
+                    s.unit
+            """)
+
+            mart_rows = cur.rowcount
+
     logging.info(
-        "OLAP load completed: patients=%d prostheses=%d new_measurements=%d",
-        len(patients), len(prostheses), len(fact_rows)
+        "OLAP load completed: patients=%d prostheses=%d "
+        "new_measurements=%d mart_rows=%d",
+        len(patients),
+        len(prostheses),
+        len(fact_rows),
+        mart_rows,
     )
 
 
 with DAG(
     dag_id=DAG_ID,
-    description="Load CRM dimensions and sensor telemetry into the OLAP fact table",
+    description=(
+        "Load CRM dimensions and sensor telemetry into OLAP, "
+        "then refresh the patient daily telemetry reporting mart"
+    ),
     start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
     schedule="@daily",
     catchup=False,
@@ -205,7 +281,7 @@ with DAG(
         "retries": 2,
         "retry_delay": timedelta(minutes=2),
     },
-    tags=["prosthesis", "etl", "olap"],
+    tags=["prosthesis", "etl", "olap", "reporting-mart"],
 ) as dag:
     load_olap = PythonOperator(
         task_id="load_dimensions_and_facts",

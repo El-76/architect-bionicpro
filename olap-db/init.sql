@@ -1,7 +1,3 @@
--- OLAP schema only.
--- This script creates database objects; it intentionally inserts no business data.
--- Airflow is responsible for loading dimensions and facts.
-
 CREATE SCHEMA IF NOT EXISTS olap;
 
 CREATE TABLE olap.dim_patient (
@@ -48,6 +44,40 @@ CREATE INDEX idx_fact_measurements_prosthesis_date
 
 CREATE INDEX idx_fact_measurements_sensor_measured_at
     ON olap.fact_sensor_measurements (sensor_id, measured_at);
+
+-- Reporting mart: one row per patient, prosthesis, day and sensor type.
+-- CRM and prosthesis attributes are denormalized here for fast report reads.
+CREATE TABLE olap.mart_patient_telemetry_daily (
+    patient_id          BIGINT NOT NULL REFERENCES olap.dim_patient(patient_id),
+    first_name          TEXT NOT NULL,
+    last_name           TEXT NOT NULL,
+
+    prosthesis_id       BIGINT NOT NULL REFERENCES olap.dim_prosthesis(prosthesis_id),
+    prosthesis_model    TEXT NOT NULL,
+    serial_number       TEXT NOT NULL,
+
+    date_id             INTEGER NOT NULL REFERENCES olap.dim_date(date_id),
+    measurement_date    DATE NOT NULL,
+
+    sensor_id           BIGINT NOT NULL REFERENCES olap.dim_sensor(sensor_id),
+    sensor_type         TEXT NOT NULL,
+    unit                TEXT NOT NULL,
+
+    measurement_count   BIGINT NOT NULL,
+    avg_value           DOUBLE PRECISION NOT NULL,
+    min_value           DOUBLE PRECISION NOT NULL,
+    max_value           DOUBLE PRECISION NOT NULL,
+
+    PRIMARY KEY (patient_id, prosthesis_id, date_id, sensor_id)
+);
+
+-- Main report access pattern: retrieve a patient's telemetry over time.
+CREATE INDEX idx_mart_patient_date
+    ON olap.mart_patient_telemetry_daily (patient_id, measurement_date DESC);
+
+-- Useful when a report filters one patient's measurements by sensor type.
+CREATE INDEX idx_mart_patient_sensor_date
+    ON olap.mart_patient_telemetry_daily (patient_id, sensor_type, measurement_date DESC);
 
 ANALYZE;
 
