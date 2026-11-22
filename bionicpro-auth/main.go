@@ -9,6 +9,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	_ "github.com/lib/pq"
 )
 
 type Session struct {
@@ -128,6 +130,7 @@ var (
 	authRequestsMu    sync.Mutex
 	authRequests      = make(map[string]AuthRequest)
 	httpClient        = &http.Client{Timeout: 10 * time.Second}
+	db                *sql.DB
 	tokenCipher       cipher.AEAD
 	internalSecret    string
 )
@@ -139,6 +142,10 @@ func main() {
 	if strings.TrimSpace(os.Getenv("OIDC_CLIENT_SECRET")) == "" {
 		log.Fatal("OIDC_CLIENT_SECRET must be set")
 	}
+	if err := initializeDatabase(); err != nil {
+		log.Fatalf("initialize database: %v", err)
+	}
+	defer db.Close()
 
 	go cleanupExpiredData()
 
@@ -357,7 +364,15 @@ func handleAuthCallback(c *gin.Context) {
 			return
 		}
 		yandexProfile = &profile
-                log.Printf("Yandex profile: %v", yandexProfile)
+
+		// Persist the latest user profile. The primary key is the stable Keycloak
+		// subject, so repeated logins update the existing row instead of inserting
+		// duplicates.
+		if err := upsertUserProfile(userID, username, identityProvider, claims, yandexProfile); err != nil {
+			log.Printf("Could not persist user profile: %v", err)
+			c.AbortWithStatus(http.StatusServiceUnavailable)
+			return
+		}
 	}
 
 	encryptedRefreshToken, err := encryptRefreshToken(tokens.RefreshToken)
@@ -547,6 +562,136 @@ func retrieveYandexAccessToken(ctx context.Context, keycloakAccessToken string) 
 		return token, nil
 	}
 	return "", errors.New("Keycloak broker token endpoint returned an empty token")
+}
+
+func initializeDatabase() error {
+	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
+	if dsn == "" {
+		return errors.New("DATABASE_URL must be set (for example: postgres://postgres:postgres@bionicpro-auth-db:5432/postgres?sslmode=disable)")
+	}
+
+	var err error
+	db, err = sql.Open("postgres", dsn)
+	if err != nil {
+		return fmt.Errorf("open PostgreSQL connection: %w", err)
+	}
+
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("connect to PostgreSQL: %w", err)
+	}
+	log.Println("Connected to PostgreSQL")
+	return nil
+}
+
+func upsertUserProfile(
+	userID string,
+	username string,
+	identityProvider string,
+	idTokenClaims map[string]interface{},
+	yandexProfile *YandexProfile,
+) error {
+	email := stringClaim(idTokenClaims, "email")
+	displayName := stringClaim(idTokenClaims, "name")
+	firstName := stringClaim(idTokenClaims, "given_name")
+	lastName := stringClaim(idTokenClaims, "family_name")
+
+	var profileData interface{}
+	if yandexProfile != nil {
+		if yandexProfile.DefaultEmail != "" {
+			email = yandexProfile.DefaultEmail
+		} else if len(yandexProfile.Emails) > 0 && yandexProfile.Emails[0] != "" {
+			email = yandexProfile.Emails[0]
+		}
+		if yandexProfile.DisplayName != "" {
+			displayName = yandexProfile.DisplayName
+		} else if yandexProfile.RealName != "" {
+			displayName = yandexProfile.RealName
+		}
+		if yandexProfile.FirstName != "" {
+			firstName = yandexProfile.FirstName
+		}
+		if yandexProfile.LastName != "" {
+			lastName = yandexProfile.LastName
+		}
+		profileData = yandexProfile
+	} else {
+		profileData = map[string]string{
+			"email":       email,
+			"name":        displayName,
+			"given_name":  firstName,
+			"family_name": lastName,
+		}
+	}
+
+	profileJSON, err := json.Marshal(profileData)
+	if err != nil {
+		return fmt.Errorf("marshal user profile: %w", err)
+	}
+
+	const query = `
+		INSERT INTO user_profiles (
+			keycloak_user_id,
+			username,
+			identity_provider,
+			email,
+			display_name,
+			first_name,
+			last_name,
+			yandex_user_id,
+			profile_data,
+			created_at,
+			updated_at
+		)
+		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''),
+		        NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), $9::jsonb,
+		        NOW(), NOW())
+		ON CONFLICT (keycloak_user_id) DO UPDATE SET
+			username = COALESCE(NULLIF(EXCLUDED.username, ''), user_profiles.username),
+			identity_provider = COALESCE(EXCLUDED.identity_provider, user_profiles.identity_provider),
+			email = COALESCE(EXCLUDED.email, user_profiles.email),
+			display_name = COALESCE(EXCLUDED.display_name, user_profiles.display_name),
+			first_name = COALESCE(EXCLUDED.first_name, user_profiles.first_name),
+			last_name = COALESCE(EXCLUDED.last_name, user_profiles.last_name),
+			yandex_user_id = COALESCE(EXCLUDED.yandex_user_id, user_profiles.yandex_user_id),
+			profile_data = EXCLUDED.profile_data,
+			updated_at = NOW()
+	`
+
+	var yandexUserID string
+	if yandexProfile != nil {
+		yandexUserID = yandexProfile.ID
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := db.ExecContext(
+		ctx,
+		query,
+		userID,
+		username,
+		identityProvider,
+		email,
+		displayName,
+		firstName,
+		lastName,
+		yandexUserID,
+		string(profileJSON),
+	); err != nil {
+		return fmt.Errorf("upsert user profile %q: %w", userID, err)
+	}
+	return nil
+}
+
+func stringClaim(claims map[string]interface{}, name string) string {
+	value, _ := claims[name].(string)
+	return strings.TrimSpace(value)
 }
 
 func fetchYandexProfile(ctx context.Context, yandexAccessToken string) (YandexProfile, error) {

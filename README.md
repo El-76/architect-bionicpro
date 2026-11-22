@@ -201,3 +201,112 @@ Realm Roles
 default-roles-reports-realm
 
 Assign role -> broker/read token
+
+
+
+docker exec -it bionicpro-auth-db /bin/bash
+
+/ # psql -h 127.0.0.1 -p 5432 -U postgres
+psql (16.16)
+Type "help" for help.
+
+postgres=# \d+
+                                         List of relations
+ Schema |     Name      | Type  |  Owner   | Persistence | Access method |    Size    | Description
+--------+---------------+-------+----------+-------------+---------------+------------+-------------
+ public | user_profiles | table | postgres | permanent   | heap          | 8192 bytes |
+(1 row)
+
+postgres=# select * from user_profiles;
+ keycloak_user_id | username | identity_provider | email | display_name | first_name | last_name | yandex_user_id | profile_data | created                   _at | updated_at
+------------------+----------+-------------------+-------+--------------+------------+-----------+----------------+--------------+--------                   ----+------------
+(0 rows)
+
+postgres=# select * from user_profiles;
+           keycloak_user_id           |  username   | identity_provider |         email         |  display_name   | first_name | last_name                    | yandex_user_id |                                                                                                                                                               profile_data                                                                                                                                                               |          created_at           |          updated_at
+--------------------------------------+-------------+-------------------+-----------------------+-----------------+------------+----------                   -+----------------+-----------------------------------------------------------------------------------------------------------------------                   ------------------------------------------------------------------------------------------------------------------------------------------                   -----------------------------------+-------------------------------+-------------------------------
+ 642caea6-ec83-4c0b-b2f4-8d06bfe53e07 | yndx.maaaah | yandex            | yndx.maaaah@yandex.ru | Anton Ostroumov | Anton      | Ostroumov                    | 389218555      | {"id": "389218555", "login": "yndx.maaaah", "psuid": "1.ABQgPA.rTYlyMioFqgIMZ8Ea93_Sw.9bhARG1s3eVIFI1hv0DVBQ", "emails                   ": ["yndx.maaaah@yandex.ru"], "birthday": "1979-08-17", "client_id": "2fc66db9b68f498a819f8d184b65de8b", "default_email": "yndx.maaaah@yan                   dex.ru", "is_avatar_empty": false} | 2026-11-21 20:10:44.842737+00 | 2026-11-21 20:10:44.842737+00
+(1 row)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+II этап
+
+
+maaaah@debian:~/architect-bionicpro$ docker exec -it data-postgres /bin/bash
+root@4058ef4907c6:/# psql -h 127.0.0.1 -p 5432 -U data_user -d data_db
+psql (16.16 (Debian 16.16-1.pgdg13+1))
+Type "help" for help.
+
+data_db=# \d+
+                                                        List of relations
+ Schema |                  Name                  |   Type   |   Owner   | Persistence | Access method |    Size    | Description
+--------+----------------------------------------+----------+-----------+-------------+---------------+------------+-------------
+ public | sensor_measurements                    | table    | data_user | permanent   | heap          | 328 kB     |
+ public | sensor_measurements_measurement_id_seq | sequence | data_user | permanent   |               | 8192 bytes |
+(2 rows)
+
+data_db=# select * from sensor_measurements;
+
+
+
+
+maaaah@debian:~/architect-bionicpro$ docker exec -it crm-oracle /bin/bash
+bash-4.4$ sqlplus CRM/crm@//localhost:1521/XEPDB1
+
+SQL*Plus: Release 21.0.0.0.0 - Production on Sun Nov 22 10:50:03 2026
+Version 21.3.0.0.0
+
+Copyright (c) 1982, 2021, Oracle.  All rights reserved.
+
+Last Successful login time: Sun Nov 22 2026 10:49:19 +00:00
+
+Connected to:
+Oracle Database 21c Express Edition Release 21.0.0.0.0 - Production
+Version 21.3.0.0.0
+
+SQL> select FIRST_NAME, LAST_NAME from PATIENTS;
+
+FIRST_NAME
+--------------------------------------------------------------------------------
+LAST_NAME
+--------------------------------------------------------------------------------
+John
+Doe
+
+Alex
+Johnson
+
+Prothetic
+One
+
+
+FIRST_NAME
+--------------------------------------------------------------------------------
+LAST_NAME
+--------------------------------------------------------------------------------
+Prothetic
+Two
+
+Prothetic
+Three
+
+
+docker logs airflow-standalone | fgrep 'Login with username'
