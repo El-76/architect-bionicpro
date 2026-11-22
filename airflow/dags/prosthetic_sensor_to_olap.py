@@ -32,7 +32,7 @@ def load_dimensions_and_facts() -> None:
     with oracle_hook.get_conn() as oracle_conn:
         with oracle_conn.cursor() as cur:
             cur.execute("""
-                SELECT patient_id, first_name, last_name
+                SELECT patient_id, patient_identity_id, first_name, last_name
                 FROM CRM.PATIENTS
                 ORDER BY patient_id
             """)
@@ -46,6 +46,7 @@ def load_dimensions_and_facts() -> None:
             prostheses = cur.fetchall()
 
     patient_ids = {row[0] for row in patients}
+    patient_id_to_identity_id = {row[0]: row[1] for row in patients}
     prosthesis_to_patient = {row[0]: row[1] for row in prostheses}
 
     for prosthesis_id, patient_id, _model, _serial in prostheses:
@@ -116,9 +117,12 @@ def load_dimensions_and_facts() -> None:
         date_id, date_value = _date_key(measured_at)
         date_rows[date_id] = (date_id, date_value)
 
+        patient_id = prosthesis_to_patient[prosthesis_id]
+
         fact_rows.append((
             measurement_id,
-            prosthesis_to_patient[prosthesis_id],
+            patient_id,
+            patient_id_to_identity_id[patient_id],
             prosthesis_id,
             SENSOR_IDS[sensor_type],
             date_id,
@@ -131,9 +135,10 @@ def load_dimensions_and_facts() -> None:
     with olap_hook.get_conn() as olap_conn:
         with olap_conn.cursor() as cur:
             cur.executemany("""
-                INSERT INTO olap.dim_patient (patient_id, first_name, last_name)
-                VALUES (%s, %s, %s)
+                INSERT INTO olap.dim_patient (patient_id, patient_identity_id, first_name, last_name)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT (patient_id) DO UPDATE SET
+                    patient_identity_id = EXCLUDED.patient_identity_id,
                     first_name = EXCLUDED.first_name,
                     last_name = EXCLUDED.last_name
             """, patients)
@@ -181,11 +186,12 @@ def load_dimensions_and_facts() -> None:
             if fact_rows:
                 cur.executemany("""
                     INSERT INTO olap.fact_sensor_measurements
-                        (measurement_id, patient_id, prosthesis_id, sensor_id,
+                        (measurement_id, patient_id, patient_identity_id, prosthesis_id, sensor_id,
                          date_id, measured_at, value)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (measurement_id) DO UPDATE SET
                         patient_id = EXCLUDED.patient_id,
+                        patient_identity_id = EXCLUDED.patient_identity_id,
                         prosthesis_id = EXCLUDED.prosthesis_id,
                         sensor_id = EXCLUDED.sensor_id,
                         date_id = EXCLUDED.date_id,
@@ -200,6 +206,7 @@ def load_dimensions_and_facts() -> None:
             cur.execute("""
                 INSERT INTO olap.mart_patient_telemetry_daily (
                     patient_id,
+                    patient_identity_id,
                     first_name,
                     last_name,
                     prosthesis_id,
@@ -217,6 +224,7 @@ def load_dimensions_and_facts() -> None:
                 )
                 SELECT
                     p.patient_id,
+                    p.patient_identity_id,
                     p.first_name,
                     p.last_name,
                     pr.prosthesis_id,

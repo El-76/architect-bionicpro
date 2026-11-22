@@ -1,9 +1,10 @@
 CREATE SCHEMA IF NOT EXISTS olap;
 
 CREATE TABLE olap.dim_patient (
-    patient_id      BIGINT PRIMARY KEY,
-    first_name      TEXT NOT NULL,
-    last_name       TEXT NOT NULL
+    patient_id          BIGINT PRIMARY KEY,
+    patient_identity_id TEXT NOT NULL,
+    first_name          TEXT NOT NULL,
+    last_name           TEXT NOT NULL
 );
 
 CREATE TABLE olap.dim_prosthesis (
@@ -27,13 +28,14 @@ CREATE TABLE olap.dim_date (
 );
 
 CREATE TABLE olap.fact_sensor_measurements (
-    measurement_id  BIGINT PRIMARY KEY,
-    patient_id      BIGINT NOT NULL REFERENCES olap.dim_patient(patient_id),
-    prosthesis_id   BIGINT NOT NULL REFERENCES olap.dim_prosthesis(prosthesis_id),
-    sensor_id       BIGINT NOT NULL REFERENCES olap.dim_sensor(sensor_id),
-    date_id         INTEGER NOT NULL REFERENCES olap.dim_date(date_id),
-    measured_at     TIMESTAMPTZ NOT NULL,
-    value           DOUBLE PRECISION NOT NULL
+    measurement_id      BIGINT PRIMARY KEY,
+    patient_id          BIGINT NOT NULL REFERENCES olap.dim_patient(patient_id),
+    patient_identity_id TEXT NOT NULL,
+    prosthesis_id       BIGINT NOT NULL REFERENCES olap.dim_prosthesis(prosthesis_id),
+    sensor_id           BIGINT NOT NULL REFERENCES olap.dim_sensor(sensor_id),
+    date_id             INTEGER NOT NULL REFERENCES olap.dim_date(date_id),
+    measured_at         TIMESTAMPTZ NOT NULL,
+    value               DOUBLE PRECISION NOT NULL
 );
 
 CREATE INDEX idx_fact_measurements_patient_date
@@ -49,6 +51,7 @@ CREATE INDEX idx_fact_measurements_sensor_measured_at
 -- CRM and prosthesis attributes are denormalized here for fast report reads.
 CREATE TABLE olap.mart_patient_telemetry_daily (
     patient_id          BIGINT NOT NULL REFERENCES olap.dim_patient(patient_id),
+    patient_identity_id TEXT NOT NULL,
     first_name          TEXT NOT NULL,
     last_name           TEXT NOT NULL,
 

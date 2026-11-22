@@ -153,6 +153,8 @@ services:
     environment:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: 3600
+      AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT: 3600
       AIRFLOW_CONN_SOURCE_ORACLE: "oracle://CRM:crm@crm-oracle:1521/?service_name=XEPDB1"
       AIRFLOW_CONN_SOURCE_TELEMETRY: "postgresql://data_user:data@data-postgres:5432/data_db"
       AIRFLOW_CONN_OLAP_POSTGRES: "postgresql://olap:olap_dev@olap-db:5432/olap"
