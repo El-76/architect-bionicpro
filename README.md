@@ -34,6 +34,21 @@ docker compose up --build
 
 `reports-api` is external to this repository and must be started separately. It must be reachable by the browser at the URL configured in `frontend/.env`.
 
+
+## OLAP storage (ClickHouse)
+
+The OLAP database is ClickHouse (`olap-clickhouse`), not PostgreSQL. The Airflow DAG writes the star-schema dimensions, append-only telemetry facts, and the denormalized `olap.mart_patient_telemetry_daily` reporting table to ClickHouse.
+
+- HTTP interface from the host: `http://localhost:8123`
+- Native protocol from the host: `localhost:9000`
+- Database: `olap`
+- User/password for this local development compose: `olap` / `olap_dev`
+- Inside Docker, use host `olap-clickhouse` and HTTP port `8123`.
+
+The ClickHouse data is persisted in the `clickhouse_data` Docker volume. The schema is initialized from `clickhouse/init.sql` on the first initialization of an empty data volume. The previous PostgreSQL `olap_data` volume is not migrated automatically; it is left untouched. The DAG can repopulate ClickHouse from the Oracle and telemetry PostgreSQL source databases when it runs. The Airflow image installs `clickhouse-connect` and connects using `CLICKHOUSE_*` environment variables.
+
+ClickHouse does not provide PostgreSQL-style foreign keys, unique constraints, or multi-table transactions. The fact table is append-only and uses `measurement_id` as the incremental watermark; dimensions use `ReplacingMergeTree`; the daily reporting mart is rebuilt by the DAG. The reporting API source is not included in this archive, so if it currently connects to PostgreSQL for OLAP reads, its driver and connection configuration must also be changed to ClickHouse.
+
 ## reports-api integration contract
 
 For every protected endpoint, before executing its business logic:

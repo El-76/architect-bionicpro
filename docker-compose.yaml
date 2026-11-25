@@ -124,23 +124,25 @@ services:
       retries: 20
     restart: unless-stopped
 
-  olap-db:
-    image: postgres:16-alpine
-    container_name: olap-db
+  olap-clickhouse:
+    image: clickhouse/clickhouse-server:25.8-alpine
+    container_name: olap-clickhouse
     environment:
-      POSTGRES_DB: olap
-      POSTGRES_USER: olap
-      POSTGRES_PASSWORD: olap_dev
+      CLICKHOUSE_DB: olap
+      CLICKHOUSE_USER: olap
+      CLICKHOUSE_PASSWORD: olap_dev
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     ports:
-      - "5434:5432"
+      - "8123:8123" # HTTP interface
+      - "9000:9000" # Native protocol
     volumes:
-      - olap_data:/var/lib/postgresql/data
-      - ./olap-db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U olap -d olap"]
+      test: ["CMD-SHELL", "clickhouse-client --user olap --password olap_dev --query 'SELECT 1' >/dev/null 2>&1"]
       interval: 5s
-      timeout: 3s
-      retries: 10
+      timeout: 5s
+      retries: 20
 
   airflow:
     build:
@@ -157,17 +159,44 @@ services:
       AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT: 3600
       AIRFLOW_CONN_SOURCE_ORACLE: "oracle://CRM:crm@crm-oracle:1521/?service_name=XEPDB1"
       AIRFLOW_CONN_SOURCE_TELEMETRY: "postgresql://data_user:data@data-postgres:5432/data_db"
-      AIRFLOW_CONN_OLAP_POSTGRES: "postgresql://olap:olap_dev@olap-db:5432/olap"
+      CLICKHOUSE_HOST: olap-clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: olap
+      CLICKHOUSE_PASSWORD: olap_dev
+      CLICKHOUSE_DATABASE: olap
       _AIRFLOW_WWW_USER_USERNAME: admin
       _AIRFLOW_WWW_USER_PASSWORD: admin
     volumes:
       - airflow-data:/opt/airflow
       - ./airflow/dags:/opt/airflow/dags:ro
     restart: unless-stopped
+    depends_on:
+      olap-clickhouse:
+        condition: service_healthy
+
+  bionicpro-reports:
+    build:
+      context: ./bionicpro-reports
+      dockerfile: Dockerfile
+    env_file:
+      - ./bionicpro-reports/.env
+    image: bionicpro-reports:local
+    container_name: bionicpro-reports
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      PORT: "8082"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8082/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
 volumes:
   airflow-data:
-  olap_data:
+  clickhouse_data:
   oracle-data:
   postgres-data:
   bionicpro_auth_data:
