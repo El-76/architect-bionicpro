@@ -22,6 +22,14 @@ type ReportDaysResponse = {
   days: string[];
 };
 
+type ReportResponse = {
+  date: string;
+  url: string;
+  format: string;
+  cached: boolean;
+  generated_at: string;
+};
+
 const AUTH_URL = (process.env.REACT_APP_AUTH_API_URL || '').replace(/\/+$/, '');
 const REPORT_API_URL = (process.env.REACT_APP_REPORT_API_URL || '').replace(/\/+$/, '');
 
@@ -212,7 +220,7 @@ const ReportPage: React.FC = () => {
           method: 'GET',
           credentials: 'include',
           headers: {
-            Accept: 'text/csv, */*',
+            Accept: 'application/json',
           },
         }
       );
@@ -231,29 +239,13 @@ const ReportPage: React.FC = () => {
         throw new Error(`Report request failed (${response.status})`);
       }
 
-      const blob = await response.blob();
-      const objectUrl = window.URL.createObjectURL(blob);
+      const report = await response.json() as ReportResponse;
+      if (!report.url || !/^https?:\/\//i.test(report.url)) {
+        throw new Error('API returned an invalid report URL');
+      }
 
-      const link = document.createElement('a');
-
-      const disposition = response.headers.get('Content-Disposition') || '';
-
-      const filenameMatch = disposition.match(
-        /filename\*?=(?:UTF-8''|")?([^";]+)/i
-      );
-
-      const filename = filenameMatch?.[1]
-        ? decodeURIComponent(filenameMatch[1].replace(/"/g, ''))
-        : `report-${date}.csv`;
-
-      link.href = objectUrl;
-      link.download = filename;
-
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-
-      window.URL.revokeObjectURL(objectUrl);
+      // The actual CSV download is served by the CDN, not by the API service.
+      window.location.assign(report.url);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : 'Unable to download report'
@@ -327,8 +319,7 @@ const ReportPage: React.FC = () => {
           )}
 
           <div className="p-4 bg-red-50 text-red-700 rounded">
-            У вас нет прав для просмотра отчётов.
-            Необходима роль prosthetic_user.
+            Ask your administrator to assign you prothetic_user role.
           </div>
         </div>
       </div>

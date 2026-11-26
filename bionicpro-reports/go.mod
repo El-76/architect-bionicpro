@@ -2,7 +2,6 @@ module bionicpro-reports
 
 go 1.22
 
-toolchain go1.24.4
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.30.0

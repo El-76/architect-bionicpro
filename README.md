@@ -325,3 +325,18 @@ Three
 
 
 docker logs airflow-standalone | fgrep 'Login with username'
+
+
+
+
+wget https://dl.min.io/aistor/mc/release/linux-amd64/acli_20260919152459.0.0_amd64.deb
+dpkg -i acli_20260919152459.0.0_amd64.deb
+acli --version
+
+
+acli alias set local http://localhost:9002 minio_user minio_password
+
+acli ls --recursive local/reports/
+
+
+docker compose restart reports-cdn

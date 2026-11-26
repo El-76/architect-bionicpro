@@ -1,100 +1,108 @@
 # bionicpro-reports
 
-Small Go/Gin service exposing `GET /report` (daily CSV export) and `GET /report/days` (available report dates).
+Go/Gin API for daily patient telemetry reports. CSV files are stored in a private S3-compatible bucket (MinIO/Ceph); the API returns a signed CDN URL and Nginx reverse-proxies and caches the file.
 
 ## Request flow
 
-1. Read the `session_id` HttpOnly cookie from the incoming request.
-2. Call `POST {AUTH_INTERNAL_URL}/internal/session/validate-and-rotate`, forwarding that cookie and sending `X-Internal-Auth: $AUTH_INTERNAL_SECRET`.
-3. Forward the `session_id` `Set-Cookie` header returned by `bionicpro-auth` to the browser.
-4. Verify the returned Keycloak access token (RS256 signature via the realm JWKS, issuer, audience, expiration and optional `nbf`).
-5. Require `prosthetic_user` in either `realm_access.roles` or a `resource_access` role list.
-6. Query `olap.mart_patient_telemetry_daily` using `patient_identity_id = user_id` from the trusted auth response.
-7. For `GET /report`, additionally filter by the requested `date` and stream the selected columns as CSV. For `GET /report/days`, return the distinct dates available for that patient as JSON.
+1. `GET /report?date=YYYY-MM-DD` validates and rotates the `session_id` through `bionicpro-auth`.
+2. The API verifies the Keycloak access token signature, issuer, expiry, optional audience and the `prosthetic_user` role.
+3. The authenticated username from the trusted auth response is used to query `patient_identity_id` in ClickHouse. The client cannot provide a patient identity or object key.
+4. The API reads the S3 manifest for this patient and date. If it is younger than `REPORT_CACHE_TTL` and the referenced CSV object exists, the existing report is reused.
+5. Otherwise, the API generates CSV, uploads it to MinIO and updates the manifest.
+6. The API returns JSON containing a signed URL under `CDN_BASE_URL`. The browser downloads the CSV from Nginx, not from the API endpoint.
+7. Nginx calls the API's signature-validation subrequest on every request (including cache hits), then serves the immutable object from its disk cache or fetches it from the API's S3-backed origin handler.
 
-**Important integration assumption:** this implementation assumes the Keycloak `sub` (`user_id` returned by `bionicpro-auth`) is exactly the value stored in `patient_identity_id`. If the warehouse uses a different identity key (for example, a Yandex ID), add an explicit, trusted identity mapping; do not accept a patient ID from a request parameter.
+Example response:
 
-The auth service's current internal endpoint performs session rotation and returns the access token in one operation. Therefore role verification necessarily happens immediately after that call; if the role is missing, the request returns `403` but the newly rotated cookie is still forwarded to the browser.
+```json
+{
+  "date": "2026-11-25",
+  "url": "http://192.168.56.106:8083/reports/...?...",
+  "format": "csv",
+  "cached": true,
+  "generated_at": "2026-11-25T19:00:00Z"
+}
+```
+
+`cached` means the API reused an already generated S3 object. It does not describe the Nginx cache state; inspect `X-Cache-Status` on the CDN response for `HIT`/`MISS`.
+
+## S3 key layout and refresh strategy
+
+Patient identity is SHA-256 hashed before it is used in an object key, so usernames and Keycloak identifiers are not exposed in object paths.
+
+```text
+reports/
+  {sha256(patient_identity)}/
+    {yyyy}/{mm}/{dd}/
+      latest.json
+      {sha256(csv-content)}.csv
+```
+
+`latest.json` points to the current immutable CSV object and records its generation time. The API reuses it for `REPORT_CACHE_TTL` (default `24h`). When it expires, the report is regenerated and uploaded under a content-hash filename; then the manifest is atomically replaced with the new version. Old CSV objects are not overwritten, so their CDN URLs remain valid and cached responses cannot accidentally serve stale bytes under a new version URL. Old object cleanup can be added later as a lifecycle policy (for example, retain versions for 30 days).
+
+Nginx caches successful CSV responses for up to seven days. Its cache key is the object path and deliberately excludes the signed query parameters. `auth_request` validates the signature before the cache lookup, so a cached file is not publicly accessible without a valid, unexpired signature. A newly generated report has a different content-hash URL, which naturally invalidates the old CDN URL without a purge operation.
 
 ## Configuration
 
-| Variable | Required | Default | Description |
-|---|---:|---|---|
-| `OLAP_CLICKHOUSE_URL` | yes | — | ClickHouse native-protocol DSN; use a read-only account |
-| `AUTH_INTERNAL_SECRET` | yes | — | Same secret as in `bionicpro-auth`; at least 32 bytes |
-| `AUTH_INTERNAL_URL` | no | `http://bionicpro-auth:8081` | Internal base URL of `bionicpro-auth` |
-| `OIDC_ISSUER` | no | `http://192.168.56.106:8080/realms/reports-realm` | Exact Keycloak realm issuer URL |
-| `OIDC_AUDIENCE` | no | `bionicpro-auth` | Expected `aud` claim in the access token; adjust to the actual access-token audience |
-| `PORT` | no | `8082` | HTTP listen port |
+The Compose deployment uses `bionicpro-reports/.env`.
 
-`AUTH_INTERNAL_SECRET` must match the value configured in `bionicpro-auth`. Do not expose the internal auth endpoint publicly. Use a private service network and TLS where traffic crosses an untrusted network.
+| Variable | Default / example | Description |
+|---|---|---|
+| `PORT` | `8082` | API listen port |
+| `OLAP_CLICKHOUSE_URL` | — | ClickHouse native-protocol DSN |
+| `AUTH_INTERNAL_URL` | `http://bionicpro-auth:8081` | Internal auth service URL |
+| `AUTH_INTERNAL_SECRET` | — | Must match the auth service internal secret; at least 32 bytes |
+| `OIDC_ISSUER` | Keycloak realm issuer | Exact `iss` claim |
+| `OIDC_AUDIENCE` | `broker` in the supplied environment | Optional expected audience. The current Keycloak token has `aud: ["broker", "account"]`; ideally add a dedicated `bionicpro-reports` audience mapper later. |
+| `S3_ENDPOINT` | `http://minio:9000` | Internal S3 endpoint; for Ceph use its S3 endpoint |
+| `S3_REGION` | `us-east-1` | S3 signing region |
+| `S3_ACCESS_KEY` | `minio_user` | MinIO/Ceph access key |
+| `S3_SECRET_KEY` | — | MinIO/Ceph secret key |
+| `S3_BUCKET` | `reports` | Private bucket; created by the API if missing |
+| `CDN_BASE_URL` | `http://192.168.56.106:8083` | URL reachable by the browser, not a Docker-only hostname |
+| `CDN_SIGNING_SECRET` | — | HMAC key for signed CDN URLs; at least 32 bytes |
+| `CDN_URL_TTL` | `24h` | Signed link lifetime |
+| `REPORT_CACHE_TTL` | `24h` | How long the S3 manifest is considered fresh |
 
-## Run locally
-
-```bash
-export OLAP_CLICKHOUSE_URL='clickhouse://reports_reader:password@localhost:9000/olap?secure=false&compress=lz4'
-export AUTH_INTERNAL_SECRET='replace-with-the-same-32+-byte-secret-as-auth'
-export AUTH_INTERNAL_URL='http://localhost:8081'
-go mod tidy
-go run .
-```
-
-Then send the browser session cookie and choose the report date:
-
-```bash
-curl -i --cookie 'session_id=YOUR_SESSION_ID' \
-  'http://localhost:8082/report?date=2026-11-23'
-```
-
-`date` is required and must be a valid `YYYY-MM-DD` calendar date. The response is `text/csv; charset=utf-8` with a date-specific `Content-Disposition` attachment header. To discover dates with data for the authenticated patient:
-
-```bash
-curl -i --cookie 'session_id=YOUR_SESSION_ID' \
-  http://localhost:8082/report/days
-```
-
-The dates endpoint returns JSON in descending order, for example:
-
-```json
-{"days":["2026-11-23","2026-11-22","2026-11-20"]}
-```
-
-Both endpoints validate the session, rotate its cookie through `bionicpro-auth`, verify the access token and require `prosthetic_user`.
-
-## Docker
-
-```bash
-docker build -t bionicpro-reports:local .
-docker run --rm -p 8082:8082 \
-  -e OLAP_CLICKHOUSE_URL='clickhouse://reports_reader:password@host.docker.internal:9000/olap?secure=false&compress=lz4' \
-  -e AUTH_INTERNAL_URL='http://host.docker.internal:8081' \
-  -e AUTH_INTERNAL_SECRET="$AUTH_INTERNAL_SECRET" \
-  bionicpro-reports:local
-```
-
-## HTTP behavior
-
-- `200` — CSV report from `GET /report`, or JSON list of available dates from `GET /report/days`.
-- `400` — missing or invalid `date` parameter on `GET /report`.
-- `401` — missing/invalid/expired session or invalid access token.
-- `403` — authenticated user does not have `prosthetic_user`.
-- `502` — auth service/JWKS dependency failure or invalid auth response.
-- `500` — OLAP query/read failure.
-
-`/health` is also provided for container health checks; it does not test downstream dependencies.
+Do not use the example MinIO credentials in a real deployment. Use dedicated least-privilege S3 credentials and keep the bucket private. The supplied Compose configuration is for local development.
 
 ## Docker Compose
 
-The Compose file runs only `bionicpro-reports`: it expects `bionicpro-auth` and the `olap-clickhouse` ClickHouse container to be reachable on a shared Docker network. This avoids starting a second ClickHouse instance or duplicating the auth service.
+The project Compose file starts MinIO and the `reports-cdn` Nginx service together with the API.
 
-1. Copy `.env.example` to `.env` and set `OLAP_CLICKHOUSE_URL` and `AUTH_INTERNAL_SECRET`.
-2. Ensure the Docker network used by the `bionicpro-auth` and `olap-clickhouse` exists and that both containers are attached to it. The default expected network name is `bionicpro-network`; override it with `DOCKER_NETWORK` if your stack uses another name.
-3. Ensure the hostnames in `AUTH_INTERNAL_URL` and `OLAP_CLICKHOUSE_URL` resolve to `bionicpro-auth` and `olap-clickhouse` from that network.
-4. Start the service:
+- MinIO is available inside the Compose network at `http://minio:9000`.
+- MinIO's host API port is `9002` because ClickHouse already publishes host port `9000`.
+- MinIO console is available at `http://localhost:9001`.
+- CDN is available at `http://192.168.56.106:8083` (change `CDN_BASE_URL` to the address your browser uses).
+- The API creates the `reports` bucket on startup, retrying while MinIO starts.
+
+Start the stack from the repository root:
 
 ```bash
 docker compose up -d --build
-docker compose logs -f bionicpro-reports
+docker compose logs -f bionicpro-reports reports-cdn minio
 ```
 
-If the shared network does not exist yet, create it with `docker network create bionicpro-network` and attach the existing `bionicpro-auth` and `olap-clickhouse` to it (or declare this same network as external in their Compose projects). Do not create a separate network for reports, because container DNS names are scoped to shared networks.
+## API endpoints
+
+- `GET /health` — liveness check.
+- `GET /report/days` — authenticated list of dates with source data.
+- `GET /report?date=YYYY-MM-DD` — authenticated JSON response with a signed CDN URL; generates the report if the S3 manifest is missing or expired.
+- `GET /reports/{object-key}?expires=...&signature=...` — S3-backed origin endpoint. Intended to be accessed through Nginx; signature is also validated by the handler itself.
+- `GET /internal/cdn-auth` — Nginx `auth_request` endpoint; validates a signed URL. It should not be exposed publicly by a separate ingress.
+
+HTTP behavior for `/report`:
+
+- `200` — JSON report URL.
+- `400` — missing or invalid date.
+- `401` — missing/invalid/expired session or invalid access token.
+- `403` — authenticated user lacks `prosthetic_user`.
+- `500` — report generation or S3 manifest update failed.
+
+`/report/days` remains `Cache-Control: no-store` and still rotates the browser session as before.
+
+## Notes
+
+- `patient_identity_id` in ClickHouse stores the username (for example, `john.doe`), so the report query uses the trusted `username` returned by `bionicpro-auth`, not the Keycloak `sub` UUID.
+- The CDN URL is signed and time-limited. Do not make the MinIO bucket public.
+- `reports-cdn` is a cache layer, not a data store. MinIO remains the source of truth for report objects.
